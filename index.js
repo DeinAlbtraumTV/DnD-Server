@@ -13,6 +13,7 @@ class GameSession {
     }
 
     static generateID() {
+        //TODO change implementation to use something like uuid, not this shit implementation
         let code = Math.random().toString(36).substring(2, 11)
 
         sessions.forEach(session => {
@@ -111,9 +112,10 @@ io.on('connection', (socket) => {
             }
         }
 
-        sessions.get(data.session_code).dmSocket.emit("addPlayer", {
+        socket.broadcast.to(data.session_code).emit("addPlayer", {
             player: socket.id,
-            playerName: data.playerName
+            playerName: data.playerName,
+            initiativeModifier: data.initiativeModifier
         })
 
         socket.join(data.session_code)
@@ -138,7 +140,7 @@ io.on('connection', (socket) => {
             return
         }
 
-        sessions.get(data.session_code).dmSocket.emit("removePlayer", {
+        socket.broadcast.to(data.session_code).emit("removePlayer", {
             player: socket.id
         })
 
@@ -167,18 +169,6 @@ io.on('connection', (socket) => {
         }
     })
 
-    socket.on("syncTokens", (data) => {
-        if (!sessions.has(data.session_code) || data.tokens === undefined || data.tokens === null)
-            return
-
-        let session = sessions.get(data.session_code)
-
-        if (socket.id == session.dm) {
-            session.tokens = data.tokens
-            socket.broadcast.emit("renderTokens", {tokens: data.tokens})
-        }
-    })
-
     socket.on("transferDm", (data) => {
         let session = sessions.get(data.session_code)
 
@@ -195,9 +185,23 @@ io.on('connection', (socket) => {
     })
 
     socket.on("syncPlayerData", (data) => {
+        socket.broadcast.to(data.session_code).emit("addPlayer", { player: socket.id, playerName: data.playerName })
+    })
+
+    socket.on("updateInitiative", (data) => {
         let session = sessions.get(data.session_code)
 
-        session.dmSocket.emit("addPlayer", { player: socket.id, playerName: data.playerName })
+        if (socket.id == session.dm || socket.id == data.player) {
+            socket.broadcast.to(data.session_code).emit("updateInitiative", { player: socket.id, initiative: data.initiative })
+        }
+    })
+
+    socket.on("updateInitiativeModifier", (data) => {
+        let session = sessions.get(data.session_code)
+
+        if (socket.id == session.dm || socket.id == data.player) {
+            socket.broadcast.to(data.session_code).emit("updateInitiativeModifier", { player: socket.id, initiativeModifier: data.initiativeModifier })
+        }
     })
 });
 
@@ -225,9 +229,11 @@ io.of("/").adapter.on("leave-room", async (room, id) => {
         }
     } else {
         if (session.dm != "" && session.dm != undefined) {
-            session.dmSocket.emit("playerDisconnected", {
-                player: id
-            })
+            sockets.forEach(
+                (socket) => socket.emit("removePlayer", {
+                    player: id
+                })
+            )
         }
 
         console.log("Player left session", room)

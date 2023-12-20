@@ -5,6 +5,9 @@ const server = http.createServer(app);
 const { Server } = require("socket.io");
 const io = new Server(server);
 
+const SERVER_VERSION = "1.0.1"
+const MIN_CLIENT_VERSION = "1.0.1"
+
 let sessions = new Map()
 
 class GameSession {
@@ -27,6 +30,10 @@ class GameSession {
 }
 
 io.on('connection', (socket) => {
+    socket.emit("version-check", {
+        serverVer: SERVER_VERSION,
+        minClientVer: MIN_CLIENT_VERSION
+    })    
 
     socket.on("sync", (data, callback) => {
         if (typeof(callback) != "function") return

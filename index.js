@@ -115,6 +115,7 @@ io.on('connection', (socket) => {
         socket.broadcast.to(data.session_code).emit("addPlayer", {
             player: socket.id,
             playerName: data.playerName,
+            initiative: data.initiative,
             initiativeModifier: data.initiativeModifier
         })
 
@@ -124,6 +125,8 @@ io.on('connection', (socket) => {
             joined: true,
             url: session.url ?? ""
         })
+
+        socket.broadcast.to(data.session_code).emit("syncPlayerData")
 
         console.log("Session", data.session_code, "joined by", socket.id)
     })
@@ -185,14 +188,19 @@ io.on('connection', (socket) => {
     })
 
     socket.on("syncPlayerData", (data) => {
-        socket.broadcast.to(data.session_code).emit("addPlayer", { player: socket.id, playerName: data.playerName })
+        socket.broadcast.to(data.session_code).emit("addPlayer", {
+            player: socket.id,
+            playerName: data.playerName,
+            initiative: data.initiative,
+            initiativeModifier: data.initiativeModifier
+        })
     })
 
     socket.on("updateInitiative", (data) => {
         let session = sessions.get(data.session_code)
 
         if (socket.id == session.dm || socket.id == data.player) {
-            socket.broadcast.to(data.session_code).emit("updateInitiative", { player: socket.id, initiative: data.initiative })
+            socket.broadcast.to(data.session_code).emit("updateInitiative", { player: data.player, initiative: data.initiative })
         }
     })
 
@@ -200,7 +208,23 @@ io.on('connection', (socket) => {
         let session = sessions.get(data.session_code)
 
         if (socket.id == session.dm || socket.id == data.player) {
-            socket.broadcast.to(data.session_code).emit("updateInitiativeModifier", { player: socket.id, initiativeModifier: data.initiativeModifier })
+            socket.broadcast.to(data.session_code).emit("updateInitiativeModifier", { player: data.player, initiativeModifier: data.initiativeModifier })
+        }
+    })
+
+    socket.on("addDummy", (data) => {
+        let session = sessions.get(data.session_code)
+
+        if (socket.id == session.dm) {
+            socket.broadcast.to(data.session_code).emit("addPlayer", { player: data.dummyId, playerName: data.name, initiativeModifier: data.initiativeModifier, isDummy: true })
+        }
+    })
+
+    socket.on("removeDummy", (data) => {
+        let session = sessions.get(data.session_code)
+
+        if (socket.id == session.dm) {
+            socket.broadcast.to(data.session_code).emit("removePlayer", { player: data.player })
         }
     })
 });
@@ -227,18 +251,16 @@ io.of("/").adapter.on("leave-room", async (room, id) => {
 
             sockets[0].broadcast.to(room).emit("syncPlayerData")
         }
-    } else {
-        if (session.dm != "" && session.dm != undefined) {
-            sockets.forEach(
-                (socket) => socket.emit("removePlayer", {
-                    player: id
-                })
-            )
-        }
-
-        console.log("Player left session", room)
     }
 
+    sockets.forEach(
+        (socket) => socket.emit("removePlayer", {
+            player: id
+        })
+    )
+
+    console.log("Player left session", room)
+    
     console.log(sockets.length, "users remaining in session")
 
     if (sockets.length == 0) {

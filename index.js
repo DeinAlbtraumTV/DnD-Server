@@ -3,7 +3,14 @@ const app = express();
 const http = require('http');
 const server = http.createServer(app);
 const { Server } = require("socket.io");
-const io = new Server(server);
+const io = new Server(server, {
+    cors: {
+        origin: true
+    }
+});
+
+const SERVER_VERSION = "2.0.0"
+const REQUIRED_CLIENT_VERSION = "2.0.0"
 
 let sessions = new Map()
 
@@ -13,7 +20,7 @@ class GameSession {
     }
 
     static generateID() {
-        let code = Math.random().toString(36).substr(2, 9)
+        let code = Math.random().toString(36).substring(2, 9)
 
         sessions.forEach(session => {
             if (session.session_code === code) {
@@ -26,32 +33,6 @@ class GameSession {
 }
 
 io.on('connection', (socket) => {
-
-    socket.on("startupSync", (data, callback) => {
-        if (typeof(callback) != "function") return
-
-        let session_exists = sessions.has(data.session_code)
-
-        if (session_exists) {
-            let session = sessions.get(data.session_code)
-
-            socket.join(data.session_code)
-
-            callback({
-                hasDm: (session.dm != "" && session.dm != undefined),
-                url: session.url ?? "",
-                tokens: session.tokens ?? [],
-                session_exists: true
-            })
-
-            return
-        }
-
-        callback({
-            session_exists: false
-        })
-    })
-
     socket.on("sync", (data, callback) => {
         if (typeof(callback) != "function") return
 
@@ -67,6 +48,15 @@ io.on('connection', (socket) => {
                 session_exists: true
             })
 
+            if (socket.rooms.size > 0) {
+                var rooms = io.sockets.adapter.sids[socket.id];
+                for(var room in rooms) {
+                    socket.leave(room);
+                }
+            }
+
+            socket.join(data.session_code)
+
             return
         }
 
@@ -80,12 +70,17 @@ io.on('connection', (socket) => {
 
         let code = GameSession.generateID()
 
+        let session = new GameSession(code)
+
+        session.dm = socket.id
+        session.dmSocket = socket
+
         sessions.set(
             code,
-            new GameSession(code)
+            session
         )
 
-        if (socket.rooms.size > 1) {
+        if (socket.rooms.size > 0) {
             var rooms = io.sockets.adapter.sids[socket.id];
             for(var room in rooms) {
                 socket.leave(room);
@@ -97,6 +92,8 @@ io.on('connection', (socket) => {
         callback({
             session_code: code
         })
+
+        console.log("Session", code, "created by", socket.id)
     })
 
     socket.on("joinSession", (data, callback) => {
@@ -111,258 +108,178 @@ io.on('connection', (socket) => {
             return
         }
 
-        if (socket.rooms.size > 1) {
+        let session = sessions.get(data.session_code)
+
+        if (socket.rooms.size > 0) {
             var rooms = io.sockets.adapter.sids[socket.id];
             for(var room in rooms) {
                 socket.leave(room);
             }
         }
 
+        socket.broadcast.to(data.session_code).emit("addPlayer", {
+            player: socket.id,
+            playerName: data.playerName,
+            initiative: data.initiative,
+            initiativeModifier: data.initiativeModifier
+        })
+
         socket.join(data.session_code)
 
         callback({
-            joined: true
+            joined: true,
+            url: session.url ?? ""
         })
+
+        socket.broadcast.to(data.session_code).emit("syncPlayerData")
+
+        console.log("Session", data.session_code, "joined by", socket.id)
     })
 
-    socket.on('login', (data, callback) => {
+    socket.on("leaveSession", (data, callback) => {
         if (typeof(callback) != "function") return
 
         if (!sessions.has(data.session_code)) {
             callback({
-                loggedIn: false,
                 status: "session not found",
-                invalidSession: true
+                invalidSession: true,
+                left: false
             });
             return
         }
 
-        let session = sessions.get(data.session_code)
+        socket.broadcast.to(data.session_code).emit("removePlayer", {
+            player: socket.id
+        })
 
-        if (session.dm == "" || session.dm == undefined) {
-            session.dm = socket.id
-            session.dmSocket = socket
+        socket.leave(data.session_code)
 
-            callback({
-                loggedIn: true,
-                tokens: session.tokens ?? [],
-                status: "ok"
-            })
+        callback({
+            left: true
+        })
 
-            io.to(data.session_code).emit("dmAssigned");
-        } else {
-            callback({
-                loggedIn: false,
-                status: "dm already assigned",
-                invalidSession: false
-            });
-        }
+        console.log("Session", data.session_code, "left by", socket.id)
     })
 
-    socket.on('loadOwlbear', (data) => {
+    socket.on('loadMap', (data) => {
         if (!sessions.has(data.session_code)) 
             return
 
         let session = sessions.get(data.session_code)
 
         if (socket.id == session.dm) {
-            io.to(data.session_code).emit("loadOwlbear", {
+            socket.broadcast.to(data.session_code).emit("loadMap", {
                 url: data.url
             })
             session.url = data.url;
+
+            console.log("Session", data.session_code, "loaded map", data.url)
         }
     })
 
-    socket.on("getPlayerSheets", (data) => {
-        if (!sessions.has(data.session_code))
-            return
+    socket.on("transferDm", (data) => {
+        let session = sessions.get(data.session_code)
 
+        let socket = io.sockets.sockets.get(data.player)
+
+        session.dm = socket.id
+        session.dmSocket = socket
+
+        console.log("Made", session.dm, "DM of", data.session_code)
+
+        socket.emit("assignDm")
+
+        socket.broadcast.to(data.session_code).emit("syncPlayerData")
+    })
+
+    socket.on("syncPlayerData", (data) => {
+        socket.broadcast.to(data.session_code).emit("addPlayer", {
+            player: socket.id,
+            playerName: data.playerName,
+            initiative: data.initiative,
+            initiativeModifier: data.initiativeModifier
+        })
+    })
+
+    socket.on("updateInitiative", (data) => {
+        let session = sessions.get(data.session_code)
+
+        if (socket.id == session.dm || socket.id == data.player) {
+            socket.broadcast.to(data.session_code).emit("updateInitiative", { player: data.player, initiative: data.initiative })
+        }
+    })
+
+    socket.on("updateInitiativeModifier", (data) => {
+        let session = sessions.get(data.session_code)
+
+        if (socket.id == session.dm || socket.id == data.player) {
+            socket.broadcast.to(data.session_code).emit("updateInitiativeModifier", { player: data.player, initiativeModifier: data.initiativeModifier })
+        }
+    })
+
+    socket.on("addDummy", (data) => {
         let session = sessions.get(data.session_code)
 
         if (socket.id == session.dm) {
-            io.to(data.player).to(session.session_code).emit("getPlayerSheets")
+            socket.broadcast.to(data.session_code).emit("addPlayer", { player: data.dummyId, playerName: data.name, initiativeModifier: data.initiativeModifier, isDummy: true })
         }
     })
 
-    socket.on("sendPlayerSheets", (data) => {
-        if (!sessions.has(data.session_code))
-            return
-
-        let session = sessions.get(data.session_code)
-
-        if (session.dm != "" && socket.id != session.dm && session.dmSocket != undefined) {
-            session.dmSocket.emit("sendPlayerSheets", data)
-        }
-    })
-
-    socket.on("loadPlayerData", (data) => {
-        if (!sessions.has(data.session_code))
-            return
-
-        let session = sessions.get(data.session_code)
-
-        if (session.dm != "" && socket.id != session.dm && session.dmSocket != undefined) {
-            session.dmSocket.emit("newPlayer", {
-                player: socket.id,
-                playerName: data.playerName,
-                hpNow: data.hpNow,
-                hpMax: data.hpMax,
-            })
-        }
-    })
-
-    socket.on("syncTokens", (data) => {
-        if (!sessions.has(data.session_code) || data.tokens === undefined || data.tokens === null)
-            return
-
+    socket.on("removeDummy", (data) => {
         let session = sessions.get(data.session_code)
 
         if (socket.id == session.dm) {
-            session.tokens = data.tokens
-            socket.broadcast.emit("renderTokens", {tokens: data.tokens})
+            socket.broadcast.to(data.session_code).emit("removePlayer", { player: data.player })
         }
     })
 
-
-    socket.on("updateCharacterSheet", (data) => {
-        if (!sessions.has(data.session_code))
-            return
-
-        let session = sessions.get(data.session_code)
-
-        if (session.dm != "" && socket.id != session.dm && session.dmSocket != undefined) {
-            switch (data.type) {
-                case "text":
-                    session.dmSocket.emit("updateCharacterSheet", {
-                        player: socket.id,
-                        elementID: data.elementID,
-                        type: data.type,
-                        value: data.value,
-                    })
-                    break
-                case "checkbox":
-                    session.dmSocket.emit("updateCharacterSheet", {
-                        player: socket.id,
-                        elementID: data.elementID,
-                        type: data.type,
-                        checked: data.checked,
-                    })
-                    break
-            }
-        }
-    })
-
-    socket.on("updateDetailsSheet", (data) => {
-        if (!sessions.has(data.session_code))
-            return
-
-        let session = sessions.get(data.session_code)
-
-        if (session.dm != "" && socket.id != session.dm && session.dmSocket != undefined) {
-            switch (data.type) {
-                case "text":
-                    session.dmSocket.emit("updateDetailsSheet", {
-                        player: socket.id,
-                        elementID: data.elementID,
-                        type: data.type,
-                        value: data.value,
-                    })
-                    break
-                case "checkbox":
-                    session.dmSocket.emit("updateDetailsSheet", {
-                        player: socket.id,
-                        elementID: data.elementID,
-                        type: data.type,
-                        checked: data.checked,
-                    })
-                    break
-            }
-        }
-    })
-
-    socket.on("updateSpellcastingSheet", (data) => {
-        if (!sessions.has(data.session_code))
-            return
-
-        let session = sessions.get(data.session_code)
-
-        if (session.dm != "" && socket.id != session.dm && session.dmSocket != undefined) {
-            switch (data.type) {
-                case "text":
-                    session.dmSocket.emit("updateSpellcastingSheet", {
-                        player: socket.id,
-                        elementID: data.elementID,
-                        type: data.type,
-                        value: data.value,
-                    })
-                    break
-                case "checkbox":
-                    session.dmSocket.emit("updateSpellcastingSheet", {
-                        player: socket.id,
-                        elementID: data.elementID,
-                        type: data.type,
-                        checked: data.checked,
-                    })
-                    break
-            }
-        }
-    })
-
-    socket.on("updatePlayerHP", (data) => {
-        let real_player = data.player
-
-        data.player = "You"
-        socket.emit("updatePlayerHP", data)
-
-        data.player = real_player
-
-        if (!sessions.has(data.session_code))
-            return
-
-        let session = sessions.get(data.session_code)
-
-        if (socket.id != session.dm && session.dm != "" && session.dmSocket != null) {
-            session.dmSocket.emit("updatePlayerHP", {
-                player: socket.id,
-                hpNow: data.hpNow,
-                hpMax: data.hpMax
-            })
-        }
-    })
-
-    socket.on('disconnecting', () => {
-        if (socket.rooms.size == 1) {
-            return
-        }
-
-        let rooms = socket.rooms.values()
-
-        rooms.next()
-
-        let session_code = rooms.next().value
-
-        if (!sessions.has(session_code))
-            return
-
-        let session = sessions.get(session_code)
-
-        if (socket.id == session.dm) {
-            session.dm = undefined;
-            session.dmSocket = undefined;
-            session.url = undefined;
-
-            io.to(session_code).emit("dmRemoved");
-
-            console.log("DM Left for Session " + session.session_code)
-        } else {
-            if (session.dm != "" && session.dm != undefined) {
-                session.dmSocket.emit("playerDisconnected", {
-                    player: socket.id
-                })
-            }
-        }
+    socket.emit("version-check", {
+        serverVer: SERVER_VERSION,
+        minClientVer: REQUIRED_CLIENT_VERSION
     })
 });
 
+io.of("/").adapter.on("leave-room", async (room, id) => {
+    let session = sessions.get(room)
+
+    if (!session) return
+
+    let sockets = await io.in(room).fetchSockets();
+
+    if (id == session.dm) {
+        session.dm = undefined;
+        session.dmSocket = undefined;
+
+        console.log("DM left session", room)
+
+        if (sockets.length > 0) {
+            sockets[0].emit("assignDm")
+            session.dm = sockets[0].id
+            session.dmSocket = sockets[0]
+
+            console.log("Made", session.dm, "DM of", room)
+
+            sockets[0].broadcast.to(room).emit("syncPlayerData")
+        }
+    }
+
+    sockets.forEach(
+        (socket) => socket.emit("removePlayer", {
+            player: id
+        })
+    )
+
+    console.log("Player left session", room)
+    
+    console.log(sockets.length, "users remaining in session")
+
+    if (sockets.length == 0) {
+        sessions.delete(room)
+
+        console.log("Deleting empty session", room)
+    }
+})
+
 server.listen(4134);
 console.log("Listening on Port 4134");
+
